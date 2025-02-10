@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 import queue
 import sys
 import undetected_chromedriver as uc
 from concurrent.futures import ThreadPoolExecutor
+from retry import retry
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
@@ -44,6 +46,7 @@ def setup_chrome():
     driver.execute_cdp_cmd('Debugger.enable', {})
     driver.execute_cdp_cmd('Log.enable', {})
     driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': init_script})
+    driver.set_page_load_timeout(10)
     return driver
 
 def get_network_requests(driver, filter_codes=[]):
@@ -98,7 +101,11 @@ def get_post_message_listeners(driver):
             listeners.append(json.loads(message))
     return listeners
 
+@retry(tries=3, delay=2, backoff=2)
 def capture_events(url, drivers):
+    if not url.startswith(('http://', 'https://')):
+        url = f'https://{url}'
+    logging.debug(f'capture_events {url}')
     try:
         driver = drivers.get()
         driver.get(url)
@@ -111,7 +118,8 @@ def capture_events(url, drivers):
 def analyze_url_and_print(url, drivers):
     output = capture_events(url, drivers)
     output = json.dumps(output)
-    sys.stdout.write(output)
+    print(output, end='')
+    return f'success {url}'
 
 def create_drivers(count):
     q = queue.Queue()
@@ -120,11 +128,23 @@ def create_drivers(count):
         q.put(driver)
     return q
 
+def log_exception(future):
+    try:
+        result = future.result()  
+        logging.info(result)
+    except Exception as e:
+        logging.exception(f"Task raised an exception: {e}")
+
 def parse_args():
     parser = argparse.ArgumentParser(description='dynamic analysis of web pages')
     parser.add_argument('urls', nargs='?', type=argparse.FileType('r'), default=sys.stdin, help='accepts list of URLs via file or STDIN')
     parser.add_argument('--threads', '-t', type=int, default=1, help='Thread count defaults to 1')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+
     args.urls = (url.strip() for url in args.urls)
     return args
 
@@ -133,7 +153,8 @@ def main():
     drivers = create_drivers(args.threads)
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for url in args.urls:
-            executor.submit(analyze_url_and_print, url, drivers)
+            future = executor.submit(analyze_url_and_print, url, drivers)
+            future.add_done_callback(log_exception)
 
 if __name__ == '__main__':
     main()
