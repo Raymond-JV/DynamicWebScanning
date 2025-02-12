@@ -4,12 +4,11 @@ import json
 import logging
 import queue
 import sys
-import undetected_chromedriver as uc
 from concurrent.futures import ThreadPoolExecutor
-from retry import retry
-from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
+from seleniumbase import Driver
 
 # https://gist.github.com/alanEG/cedc7a360300a1e49b0a3c98ec30db3c#file-postmessaged-py-L4
 # decorator to detect when post message listeners are added to a page 
@@ -42,7 +41,7 @@ def setup_chrome():
     chrome_options = Options()
     chrome_options.set_capability('goog:loggingPrefs', caps['goog:loggingPrefs'])
 
-    driver = uc.Chrome(headless=False,use_subprocess=False, options=chrome_options)
+    driver = Driver(uc=True, incognito=True, log_cdp_events=True, headless=True)
     driver.execute_cdp_cmd('Debugger.enable', {})
     driver.execute_cdp_cmd('Log.enable', {})
     driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': init_script})
@@ -63,7 +62,6 @@ def get_network_requests(driver, filter_codes=[]):
             'url' : response['url'],
             'mime_type': response['mimeType'],
             'status' : response['status']
-
         })
     return requests
 
@@ -101,7 +99,6 @@ def get_post_message_listeners(driver):
             listeners.append(json.loads(message))
     return listeners
 
-@retry(tries=3, delay=2, backoff=2)
 def capture_events(url, drivers):
     if not url.startswith(('http://', 'https://')):
         url = f'https://{url}'
@@ -112,14 +109,18 @@ def capture_events(url, drivers):
         requests = get_network_requests(driver, filter_codes=[200,204])
         listeners = get_post_message_listeners(driver)
         return { 'url': url, 'network_requests': requests, 'post_message_listeners': listeners }
-    finally:
+    except TimeoutException:
+        logging.info(f'{url} timed out.')
+    finally: 
+        driver.quit()
+        driver = setup_chrome()
         drivers.put(driver)
 
 def analyze_url_and_print(url, drivers):
     output = capture_events(url, drivers)
-    output = json.dumps(output)
-    print(output, end='')
-    return f'success {url}'
+    if output:
+        output = json.dumps(output)
+        print(output)
 
 def create_drivers(count):
     q = queue.Queue()
@@ -128,21 +129,20 @@ def create_drivers(count):
         q.put(driver)
     return q
 
-def log_exception(future):
+def check_for_errors(future, url):
     try:
         result = future.result()  
-        logging.info(result)
     except Exception as e:
-        logging.exception(f"Task raised an exception: {e}")
+        logging.exception(f'Scanning "{url}" raised an exception: {e}')
 
 def parse_args():
     parser = argparse.ArgumentParser(description='dynamic analysis of web pages')
     parser.add_argument('urls', nargs='?', type=argparse.FileType('r'), default=sys.stdin, help='accepts list of URLs via file or STDIN')
     parser.add_argument('--threads', '-t', type=int, default=1, help='Thread count defaults to 1')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
+    parser.add_argument('--debug', '-d', action='store_true', help='Enable debug logging')
     args = parser.parse_args()
 
-    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
     args.urls = (url.strip() for url in args.urls)
@@ -150,11 +150,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    drivers = create_drivers(args.threads)
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        drivers = create_drivers(args.threads)
         for url in args.urls:
             future = executor.submit(analyze_url_and_print, url, drivers)
-            future.add_done_callback(log_exception)
+            future.add_done_callback(lambda future: check_for_errors(future, url))
 
 if __name__ == '__main__':
     main()
