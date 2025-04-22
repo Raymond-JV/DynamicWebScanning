@@ -106,7 +106,7 @@ def capture_events(url, drivers):
     try:
         driver = drivers.get()
         driver.get(url)
-        requests = get_network_requests(driver, filter_codes=[200,204])
+        requests = get_network_requests(driver, filter_codes=[200,201,202,204,206])
         listeners = get_post_message_listeners(driver)
         return { 'url': url, 'network_requests': requests, 'post_message_listeners': listeners }
     except TimeoutException:
@@ -138,14 +138,18 @@ def check_for_errors(future, url):
 def parse_args():
     parser = argparse.ArgumentParser(description='dynamic analysis of web pages')
     parser.add_argument('urls', nargs='?', type=argparse.FileType('r'), default=sys.stdin, help='accepts list of URLs via file or STDIN')
-    parser.add_argument('--threads', '-t', type=int, default=1, help='Thread count defaults to 1')
-    parser.add_argument('--debug', '-d', action='store_true', help='Enable debug logging')
+    parser.add_argument('-u', '--url', type=str, required=False, help='Scan single URL')
+    parser.add_argument('-t', '--threads', type=int, default=1, help='Thread count defaults to 1')
+    parser.add_argument('-d', '--debug', action='store_true', help='Enable debug logging')
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    args.urls = (url.strip() for url in args.urls)
+    
+    if args.url:
+        args.urls = [args.url.strip()]
+    else:
+        args.urls = (url.strip() for url in args.urls)
     return args
 
 def main():
